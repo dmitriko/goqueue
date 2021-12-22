@@ -12,6 +12,7 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+// Represents an operation received from client
 type Op struct {
 	Name  string
 	Key   string
@@ -45,6 +46,7 @@ func (op *Op) Unmarshal(s string) error {
 	return nil
 }
 
+// Item to store in memory
 type Item struct {
 	Key   string
 	Value string
@@ -55,6 +57,7 @@ func NewItem(key, value string) *Item {
 	return &Item{Key: key, Value: value}
 }
 
+//Ordered map, stores inserting order
 type Storage struct {
 	items map[string]*Item
 	list  *list.List
@@ -166,6 +169,7 @@ func (s *Storage) processMsg(svc *sqs.SQS, queue string, inCh chan *sqs.Message,
 	}
 }
 
+// Loop for polling messages from sqs queue
 func pollSQS(svc *sqs.SQS, queue string, chn chan *sqs.Message) {
 	for {
 		r, err := svc.ReceiveMessage(&sqs.ReceiveMessageInput{
