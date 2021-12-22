@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"goqueue/pkg/server"
 	"log"
 	"os"
 	"strings"
@@ -49,21 +50,12 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	oper := &server.Op{Name: *op, Key: *key, Value: *val}
 	svc := sqs.New(sess)
 	_, err = svc.SendMessage(&sqs.SendMessageInput{
 		DelaySeconds: aws.Int64(10),
-		MessageAttributes: map[string]*sqs.MessageAttributeValue{
-			"OP": &sqs.MessageAttributeValue{
-				DataType:    aws.String("String"),
-				StringValue: op,
-			},
-			"Key": &sqs.MessageAttributeValue{
-				DataType:    aws.String("String"),
-				StringValue: key,
-			},
-		},
-		MessageBody: val,
-		QueueUrl:    queue,
+		MessageBody:  aws.String(oper.Marshal()),
+		QueueUrl:     queue,
 	})
 	if err != nil {
 		log.Fatal(err)
