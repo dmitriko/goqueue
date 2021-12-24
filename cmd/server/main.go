@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"syscall"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
@@ -15,6 +16,7 @@ import (
 	"goqueue/pkg/server"
 )
 
+//Appends text received via channel to file
 func writeOut(ctx context.Context, filename string, inCh chan string) {
 	f, err := os.OpenFile(filename, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0600)
 	if err != nil {
@@ -35,21 +37,6 @@ func writeOut(ctx context.Context, filename string, inCh chan string) {
 		}
 
 	}
-}
-
-func initContext() context.Context {
-	ctx := context.Background()
-	ctx, cancel := context.WithCancel(ctx)
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt)
-	go func() {
-		select {
-		case <-c:
-			cancel()
-		case <-ctx.Done():
-		}
-	}()
-	return ctx
 }
 
 func main() {
@@ -76,7 +63,8 @@ func main() {
 	}
 	svc := sqs.New(sess)
 	outCh := make(chan string)
-	ctx := initContext()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	go writeOut(ctx, *out, outCh)
 	storage.Listen(ctx, svc, *queue, outCh)
 }
