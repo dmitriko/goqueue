@@ -9,6 +9,8 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/sqs"
+	"github.com/rs/zerolog"
+
 	"github.com/rs/zerolog/log"
 )
 
@@ -199,4 +201,8 @@ func (s *Storage) Listen(ctx context.Context, svc *sqs.SQS, queue string, outCh 
 	go s.processMsg(svc, queue, toProcess, outCh)
 	go pollSQS(svc, queue, toProcess)
 	<-ctx.Done()
+}
+
+func init() {
+	zerolog.SetGlobalLevel(zerolog.InfoLevel)
 }

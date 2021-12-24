@@ -10,6 +10,7 @@ import (
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/sqs"
+	"github.com/rs/zerolog"
 
 	"goqueue/pkg/server"
 )
@@ -52,6 +53,7 @@ func initContext() context.Context {
 }
 
 func main() {
+	zerolog.SetGlobalLevel(zerolog.DebugLevel)
 	queue := flag.String("queue", "", "The name of the queue.")
 	out := flag.String("out", "", "File path to put output.")
 	flag.Parse()
