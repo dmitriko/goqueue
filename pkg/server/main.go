@@ -14,6 +14,12 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+// Abstract out SQS/AMQP message
+type OpMsg interface {
+	Op() (*Op, error)
+	Ack() error
+}
+
 // Represents an operation received from client
 type Op struct {
 	Name  string
@@ -46,6 +52,32 @@ func (op *Op) Unmarshal(s string) error {
 		op.Value = string(v)
 	}
 	return nil
+}
+
+type SQSMsg struct {
+	svc      *sqs.SQS
+	queueURL string
+	msg      *sqs.Message
+}
+
+// Return Op(eration) received from client withing message
+func (m *SQSMsg) Op() (*Op, error) {
+	op := &Op{}
+	err := op.Unmarshal(*m.msg.Body)
+	if err != nil {
+		log.Error().Msg("Could not unmarshal body.")
+	}
+	return op, err
+}
+
+// Acknoledge message, in case SQS - delete from queue
+func (m *SQSMsg) Ack() error {
+	_, err := m.svc.DeleteMessage(&sqs.DeleteMessageInput{
+		QueueUrl:      aws.String(m.queueURL),
+		ReceiptHandle: m.msg.ReceiptHandle,
+	})
+	return err
+
 }
 
 // Item to store in memory
@@ -124,16 +156,11 @@ func (s *Storage) GetAllItems() []*Item {
 
 //Runs inside a go routine and process every sqs message received from
 // inCh, puts an output to outCh
-func (s *Storage) processMsg(svc *sqs.SQS, queue string, inCh chan *sqs.Message, outCh chan string) {
+func (s *Storage) processMsg(inCh chan OpMsg, outCh chan string) {
 	for {
 		msg := <-inCh
 		log.Debug().Msgf("Processing %#v", msg)
-		op := &Op{}
-		err := op.Unmarshal(*msg.Body)
-		if err != nil {
-			log.Error().Msg("Could not unmarshal body.")
-			op.Name = "foo" // so it is ignored in switch
-		}
+		op, err := msg.Op()
 		log.Debug().Msgf("Operation is: %#v", op)
 		switch op.Name {
 		case "AddItem":
@@ -160,10 +187,7 @@ func (s *Storage) processMsg(svc *sqs.SQS, queue string, inCh chan *sqs.Message,
 		default:
 			log.Warn().Msgf("No handler for operation %#v", op)
 		}
-		_, err = svc.DeleteMessage(&sqs.DeleteMessageInput{
-			QueueUrl:      aws.String(queue),
-			ReceiptHandle: msg.ReceiptHandle,
-		})
+		err = msg.Ack()
 		if err != nil {
 			log.Error().Msg(err.Error())
 		}
@@ -172,7 +196,7 @@ func (s *Storage) processMsg(svc *sqs.SQS, queue string, inCh chan *sqs.Message,
 }
 
 // Loop for polling messages from sqs queue
-func pollSQS(svc *sqs.SQS, queue string, chn chan *sqs.Message) {
+func pollSQS(svc *sqs.SQS, queue string, chn chan OpMsg) {
 	for {
 		r, err := svc.ReceiveMessage(&sqs.ReceiveMessageInput{
 			MessageAttributeNames: []*string{
@@ -188,7 +212,12 @@ func pollSQS(svc *sqs.SQS, queue string, chn chan *sqs.Message) {
 		}
 		if len(r.Messages) > 0 {
 			for _, msg := range r.Messages {
-				chn <- msg
+				opMsg := &SQSMsg{
+					svc:      svc,
+					queueURL: queue,
+					msg:      msg,
+				}
+				chn <- opMsg
 			}
 		}
 	}
@@ -196,10 +225,10 @@ func pollSQS(svc *sqs.SQS, queue string, chn chan *sqs.Message) {
 }
 
 //outCh for putting strings into output file
-func (s *Storage) Listen(ctx context.Context, svc *sqs.SQS, queue string, outCh chan string) {
-	toProcess := make(chan *sqs.Message)
-	go s.processMsg(svc, queue, toProcess, outCh)
-	go pollSQS(svc, queue, toProcess)
+func (s *Storage) Listen(ctx context.Context, svc *sqs.SQS, queue string, toFile chan string) {
+	fromSQS := make(chan OpMsg)
+	go s.processMsg(fromSQS, toFile)
+	go pollSQS(svc, queue, fromSQS)
 	<-ctx.Done()
 }
 
