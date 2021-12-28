@@ -6,6 +6,7 @@ import (
 	b64 "encoding/base64"
 	"errors"
 	"strings"
+	"sync"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/sqs"
@@ -72,6 +73,7 @@ func (m *SQSMsg) Op() (*Op, error) {
 
 // Acknoledge message, in case SQS - delete from queue
 func (m *SQSMsg) Ack() error {
+	log.Debug().Msgf("Deleting %#v from queue.", m)
 	_, err := m.svc.DeleteMessage(&sqs.DeleteMessageInput{
 		QueueUrl:      aws.String(m.queueURL),
 		ReceiptHandle: m.msg.ReceiptHandle,
@@ -93,6 +95,7 @@ func NewItem(key, value string) *Item {
 
 //Ordered map, stores inserting order
 type Storage struct {
+	sync.Mutex
 	items map[string]*Item
 	list  *list.List
 }
@@ -106,6 +109,8 @@ func NewStorage() *Storage {
 
 func (s *Storage) AddItem(item *Item) error {
 	log.Debug().Msgf("Adding item %#v", item)
+	s.Lock()
+	defer s.Unlock()
 	if item.Key == "" {
 		return errors.New("Key could not be empty string.")
 	}
@@ -121,6 +126,8 @@ func (s *Storage) GetItem(key string) (*Item, bool) {
 
 //Returns true if item was deleted, false otherwise
 func (s *Storage) RemoveItem(key string) bool {
+	s.Lock()
+	defer s.Unlock()
 	item, exists := s.items[key]
 	if !exists {
 		return false
@@ -154,58 +161,53 @@ func (s *Storage) GetAllItems() []*Item {
 	return r
 }
 
-//Runs inside a go routine and process every sqs message received from
-// inCh, puts an output to outCh
-func (s *Storage) processMsg(inCh chan OpMsg, outCh chan string) {
-	for {
-		msg := <-inCh
-		log.Debug().Msgf("Processing %#v", msg)
-		op, err := msg.Op()
-		log.Debug().Msgf("Operation is: %#v", op)
-		switch op.Name {
-		case "AddItem":
-			err := s.AddItem(NewItem(op.Key, op.Value))
-			if err != nil {
-				log.Error().Msg(err.Error())
-			}
-			log.Debug().Msgf("Item with key %s has added.", op.Key)
-		case "RemoveItem":
-			if s.RemoveItem(op.Key) {
-				log.Debug().Msgf("Item with key %s removed", op.Key)
-			}
-		case "GetItem":
-			item, exists := s.GetItem(op.Key)
-			if exists {
-				log.Debug().Msgf("Sending to file %s", item.Value)
-				outCh <- item.Value
-			}
-		case "GetAllItems":
-			for _, item := range s.GetAllItems() {
-				log.Debug().Msgf("Sending to file %s", item.Value)
-				outCh <- item.Value
-			}
-		default:
-			log.Warn().Msgf("No handler for operation %#v", op)
-		}
-		err = msg.Ack()
+//Processes one message and put output (if requred) to outCh channel
+func (s *Storage) processMsg(msg OpMsg, outCh chan string) {
+	log.Debug().Msgf("Processing %#v", msg)
+	op, err := msg.Op()
+	log.Debug().Msgf("Operation is: %#v", op)
+	switch op.Name {
+	case "AddItem":
+		err := s.AddItem(NewItem(op.Key, op.Value))
 		if err != nil {
 			log.Error().Msg(err.Error())
 		}
-
+		log.Debug().Msgf("Item with key %s has added.", op.Key)
+	case "RemoveItem":
+		if s.RemoveItem(op.Key) {
+			log.Debug().Msgf("Item with key %s removed", op.Key)
+		}
+	case "GetItem":
+		item, exists := s.GetItem(op.Key)
+		if exists {
+			log.Debug().Msgf("Sending to file %s", item.Value)
+			outCh <- item.Value
+		}
+	case "GetAllItems":
+		for _, item := range s.GetAllItems() {
+			log.Debug().Msgf("Sending to file %s", item.Value)
+			outCh <- item.Value
+		}
+	default:
+		log.Warn().Msgf("No handler for operation %#v", op)
 	}
+	err = msg.Ack()
+	if err != nil {
+		log.Error().Msg(err.Error())
+	}
+
 }
 
 // Loop for polling messages from sqs queue
-func pollSQS(svc *sqs.SQS, queue string, chn chan OpMsg) {
+func pollSQS(s *Storage, svc *sqs.SQS, queue string, toFile chan string) {
 	for {
 		r, err := svc.ReceiveMessage(&sqs.ReceiveMessageInput{
 			MessageAttributeNames: []*string{
 				aws.String(sqs.QueueAttributeNameAll),
 			},
-			QueueUrl:            aws.String(queue),
-			MaxNumberOfMessages: aws.Int64(1),
-			VisibilityTimeout:   aws.Int64(10),
-			WaitTimeSeconds:     aws.Int64(1),
+			QueueUrl:          aws.String(queue),
+			VisibilityTimeout: aws.Int64(10),
+			WaitTimeSeconds:   aws.Int64(1),
 		})
 		if err != nil {
 			log.Error().Msg(err.Error())
@@ -217,7 +219,7 @@ func pollSQS(svc *sqs.SQS, queue string, chn chan OpMsg) {
 					queueURL: queue,
 					msg:      msg,
 				}
-				chn <- opMsg
+				go s.processMsg(opMsg, toFile)
 			}
 		}
 	}
@@ -226,9 +228,7 @@ func pollSQS(svc *sqs.SQS, queue string, chn chan OpMsg) {
 
 //outCh for putting strings into output file
 func (s *Storage) Listen(ctx context.Context, svc *sqs.SQS, queue string, toFile chan string) {
-	fromSQS := make(chan OpMsg)
-	go s.processMsg(fromSQS, toFile)
-	go pollSQS(svc, queue, fromSQS)
+	go pollSQS(s, svc, queue, toFile)
 	<-ctx.Done()
 }
 
